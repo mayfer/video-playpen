@@ -185,7 +185,7 @@ extern "C" bool setWindowTrafficLightsPosition(void *windowPtr, double x,
 }
 
 extern "C" bool setNativeWindowDragRegion(void *windowPtr, double x,
-										  double height) {
+										  double width, double height) {
 	if (windowPtr == nullptr) {
 		return false;
 	}
@@ -203,8 +203,10 @@ extern "C" bool setNativeWindowDragRegion(void *windowPtr, double x,
 		}
 
 		CGFloat dragX = MAX(0.0, x);
+		CGFloat dragRequestedWidth = MAX(0.0, width);
 		CGFloat dragHeight = MAX(0.0, height);
-		CGFloat dragWidth = MAX(0.0, contentView.bounds.size.width - dragX);
+		CGFloat dragWidth =
+			MIN(MAX(0.0, contentView.bounds.size.width - dragX), dragRequestedWidth);
 		if (dragHeight <= 0.0 || dragWidth <= 0.0) {
 			return;
 		}

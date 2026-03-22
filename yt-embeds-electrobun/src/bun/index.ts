@@ -1,6 +1,8 @@
 import { ApplicationMenu, BrowserWindow, Updater, Utils } from "electrobun/bun";
+import { Database } from "bun:sqlite";
 import { dlopen, FFIType } from "bun:ffi";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 const DEV_SERVER_PORT = 5173;
@@ -8,8 +10,56 @@ const DEV_SERVER_URL = `http://localhost:${DEV_SERVER_PORT}`;
 const MAC_TRAFFIC_LIGHTS_X = 14;
 const MAC_TRAFFIC_LIGHTS_Y = 12;
 const MAC_NATIVE_DRAG_REGION_X = 92;
+const MAC_NATIVE_DRAG_REGION_WIDTH = 260;
 const MAC_NATIVE_DRAG_REGION_HEIGHT = 52;
 const DEBUG_SAFE_WINDOW = process.env.YT_EMBEDS_DEBUG_WINDOW === "1";
+
+function getAppDataDir(): string {
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Application Support", "yt-embeds-electrobun");
+  }
+
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
+    return join(appData, "yt-embeds-electrobun");
+  }
+
+  return join(homedir(), ".local", "share", "yt-embeds-electrobun");
+}
+
+function createPinsStore() {
+  const appDataDir = getAppDataDir();
+  mkdirSync(appDataDir, { recursive: true });
+
+  const database = new Database(join(appDataDir, "pins.sqlite"));
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS pinned_nodes (
+      node_id TEXT PRIMARY KEY,
+      pinned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  const selectPinnedIds = database.query("SELECT node_id FROM pinned_nodes ORDER BY pinned_at DESC");
+  const insertPinnedId = database.query("INSERT OR REPLACE INTO pinned_nodes (node_id) VALUES (?)");
+  const deletePinnedId = database.query("DELETE FROM pinned_nodes WHERE node_id = ?");
+  const findPinnedId = database.query("SELECT node_id FROM pinned_nodes WHERE node_id = ? LIMIT 1");
+
+  return {
+    listPinnedIds(): string[] {
+      return selectPinnedIds.all().map((row) => String((row as { node_id: string }).node_id));
+    },
+    togglePinnedId(nodeId: string): { pinned: boolean; pinnedIds: string[] } {
+      const existing = findPinnedId.get(nodeId) as { node_id: string } | null;
+      if (existing) {
+        deletePinnedId.run(nodeId);
+        return { pinned: false, pinnedIds: this.listPinnedIds() };
+      }
+
+      insertPinnedId.run(nodeId);
+      return { pinned: true, pinnedIds: this.listPinnedIds() };
+    }
+  };
+}
 
 function getFrontendRoot(): string {
   const bundledFrontendRoot = join(import.meta.dir, "frontend");
@@ -22,13 +72,44 @@ function getFrontendRoot(): string {
 
 function createFrontendServer(): Bun.Server<undefined> {
   const frontendRoot = getFrontendRoot();
+  const pinsStore = createPinsStore();
   let server: Bun.Server<undefined>;
+  const apiCorsHeaders = {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-headers": "content-type",
+    "cache-control": "no-store"
+  };
 
   server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch(request) {
+    async fetch(request) {
       const url = new URL(request.url);
+      if (url.pathname.startsWith("/api/") && request.method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: apiCorsHeaders
+        });
+      }
+
+      if (url.pathname === "/api/pins" && request.method === "GET") {
+        return Response.json({ pinnedIds: pinsStore.listPinnedIds() }, {
+          headers: apiCorsHeaders
+        });
+      }
+
+      if (url.pathname === "/api/pins/toggle" && request.method === "POST") {
+        const body = await request.json() as { nodeId?: string };
+        if (!body.nodeId) {
+          return Response.json({ error: "Missing node id" }, { status: 400, headers: apiCorsHeaders });
+        }
+
+        return Response.json(pinsStore.togglePinnedId(body.nodeId), {
+          headers: apiCorsHeaders
+        });
+      }
+
       if (url.pathname.startsWith("/youtube/")) {
         const videoId = url.pathname.split("/").pop();
         if (!videoId) {
@@ -130,7 +211,7 @@ function applyMacOSWindowEffects(mainWindow: BrowserWindow) {
         returns: FFIType.bool
       },
       setNativeWindowDragRegion: {
-        args: [FFIType.ptr, FFIType.f64, FFIType.f64],
+        args: [FFIType.ptr, FFIType.f64, FFIType.f64, FFIType.f64],
         returns: FFIType.bool
       }
     });
@@ -145,6 +226,7 @@ function applyMacOSWindowEffects(mainWindow: BrowserWindow) {
       lib.symbols.setNativeWindowDragRegion(
         mainWindow.ptr,
         MAC_NATIVE_DRAG_REGION_X,
+        MAC_NATIVE_DRAG_REGION_WIDTH,
         MAC_NATIVE_DRAG_REGION_HEIGHT
       );
 
