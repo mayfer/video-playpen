@@ -1,0 +1,29 @@
+{
+  "name": "yt-embeds-electrobun",
+  "version": "1.0.0",
+  "description": "ElectroBun version of yt-embeds with native macOS vibrancy",
+  "scripts": {
+    "dev": "bun run build && electrobun dev",
+    "dev:hmr": "concurrently \"bun run hmr\" \"bun run dev\"",
+    "hmr": "vite --port 5173",
+    "build:native-effects": "bash ./scripts/build-macos-effects.sh",
+    "build": "bun run build:native-effects && vite build && electrobun build",
+    "build:prod": "bun run build:native-effects && vite build && electrobun build --channel prod",
+    "start": "bun run dev",
+    "typecheck": "tsc --noEmit"
+  },
+  "author": {
+    "name": "Murat Ayfer",
+    "email": "murat@ayfer.net"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "electrobun": "1.16.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3",
+    "vite": "^6.3.0"
+  }
+}

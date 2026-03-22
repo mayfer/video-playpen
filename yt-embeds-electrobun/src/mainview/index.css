@@ -1,0 +1,243 @@
+:root {
+  color-scheme: dark;
+  font-family: "SF Pro Display", "Segoe UI", sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.94);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  background: transparent;
+}
+
+body {
+  min-height: 100vh;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(circle at top left, rgba(255, 77, 77, 0.18), transparent 30%),
+    radial-gradient(circle at 80% 20%, rgba(85, 160, 255, 0.16), transparent 32%),
+    linear-gradient(180deg, rgba(8, 10, 14, 0.18), rgba(8, 10, 14, 0.34));
+  pointer-events: none;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.app-shell {
+  position: relative;
+  min-height: 100vh;
+}
+
+.top-bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  min-height: 52px;
+  padding: 0 20px 0 96px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(8, 12, 18, 0.18);
+}
+
+.top-bar-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.content {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 28px 24px 40px;
+}
+
+.hero {
+  margin-bottom: 20px;
+}
+
+.hero h1 {
+  margin: 0 0 10px;
+  font-size: clamp(2rem, 4vw, 3.4rem);
+  line-height: 0.95;
+  letter-spacing: -0.04em;
+}
+
+.hero-copy {
+  max-width: 60ch;
+}
+
+.card {
+  margin-top: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 22px;
+  background: rgba(10, 14, 20, 0.28);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.28);
+}
+
+.video-card {
+  padding: 18px;
+}
+
+.section-label {
+  margin-bottom: 14px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.video-frame {
+  overflow: hidden;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.06);
+  aspect-ratio: 16 / 9;
+}
+
+.video-frame iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.video-frame electrobun-webview,
+.video-webview {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+}
+
+.controls-card {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 16px 18px;
+}
+
+.form-card {
+  padding: 22px;
+}
+
+.form-card h2 {
+  margin: 0 0 6px;
+  font-size: 1.3rem;
+}
+
+.muted {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.input-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.input-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 14px;
+  color: rgba(255, 255, 255, 0.94);
+  background: rgba(255, 255, 255, 0.08);
+  outline: none;
+}
+
+.input-row input::placeholder {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.input-row input:focus {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.button {
+  border: 0;
+  border-radius: 999px;
+  padding: 12px 18px;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    transform 120ms ease,
+    opacity 120ms ease,
+    background-color 120ms ease;
+}
+
+.button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.button-primary {
+  color: #0f1114;
+  background: #ffffff;
+}
+
+.button-secondary {
+  color: rgba(255, 255, 255, 0.94);
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.button-accent {
+  color: white;
+  background: linear-gradient(135deg, #ff3b30, #ff6a3d);
+}
+
+.video-counter {
+  min-width: 10rem;
+  text-align: center;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.86);
+}
+
+@media (max-width: 720px) {
+  .top-bar {
+    padding-left: 84px;
+  }
+
+  .content {
+    padding: 22px 16px 32px;
+  }
+
+  .controls-card,
+  .input-row {
+    flex-direction: column;
+  }
+
+  .video-counter {
+    min-width: 0;
+  }
+
+  .button,
+  .input-row input {
+    width: 100%;
+  }
+}
