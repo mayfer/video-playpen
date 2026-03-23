@@ -1,9 +1,17 @@
 import { ApplicationMenu, BrowserWindow, Updater, Utils } from "electrobun/bun";
 import { Database } from "bun:sqlite";
 import { dlopen, FFIType } from "bun:ffi";
-import { existsSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import {
+  APP_DATA_DIR,
+  clearCacheDirectory,
+  downloadVideoToCache,
+  ensureYtDlpReady,
+  findCachedFilePath,
+  getYtDlpRuntimeState,
+  openCacheDirectory
+} from "./downloader";
 
 const DEV_SERVER_PORT = 5173;
 const DEV_SERVER_URL = `http://localhost:${DEV_SERVER_PORT}`;
@@ -13,52 +21,442 @@ const MAC_NATIVE_DRAG_REGION_X = 92;
 const MAC_NATIVE_DRAG_REGION_WIDTH = 260;
 const MAC_NATIVE_DRAG_REGION_HEIGHT = 52;
 const DEBUG_SAFE_WINDOW = process.env.YT_EMBEDS_DEBUG_WINDOW === "1";
+const MAX_CACHE_BYTES = 2 * 1024 * 1024 * 1024;
+const YT_DLP_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-function getAppDataDir(): string {
-  if (process.platform === "darwin") {
-    return join(homedir(), "Library", "Application Support", "yt-embeds-electrobun");
-  }
+type DownloadState = "missing" | "downloading" | "ready" | "error";
+type PlayerMode = "local" | "youtube";
 
-  if (process.platform === "win32") {
-    const appData = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
-    return join(appData, "yt-embeds-electrobun");
-  }
+type DownloadStatus = {
+  videoId: string;
+  state: DownloadState;
+  mediaUrl: string | null;
+  title: string | null;
+  durationSeconds: number | null;
+  fileSizeBytes: number | null;
+  totalSizeBytes: number | null;
+  progressPercent: number | null;
+  isPartial: boolean;
+  error: string | null;
+};
 
-  return join(homedir(), ".local", "share", "yt-embeds-electrobun");
+type CacheRecord = {
+  video_id: string;
+  title: string | null;
+  file_path: string | null;
+  file_size_bytes: number | null;
+  duration_seconds: number | null;
+  status: string;
+  error_message: string | null;
+  last_accessed_at: string | null;
+};
+
+type ActiveDownload = {
+  promise: Promise<void>;
+  downloadedBytes: number | null;
+  totalSizeBytes: number | null;
+  progressPercent: number | null;
+  error: string | null;
+};
+
+const DATABASE_PATH = join(APP_DATA_DIR, "app.sqlite");
+
+const database = new Database(DATABASE_PATH);
+database.exec(`
+  CREATE TABLE IF NOT EXISTS pinned_nodes (
+    node_id TEXT PRIMARY KEY,
+    pinned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS media_cache (
+    video_id TEXT PRIMARY KEY,
+    title TEXT,
+    file_path TEXT,
+    file_size_bytes INTEGER,
+    duration_seconds REAL,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    last_accessed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+const selectPinnedIdsQuery = database.query("SELECT node_id FROM pinned_nodes ORDER BY pinned_at DESC");
+const insertPinnedIdQuery = database.query("INSERT OR REPLACE INTO pinned_nodes (node_id, pinned_at) VALUES (?, CURRENT_TIMESTAMP)");
+const deletePinnedIdQuery = database.query("DELETE FROM pinned_nodes WHERE node_id = ?");
+const findPinnedIdQuery = database.query("SELECT node_id FROM pinned_nodes WHERE node_id = ? LIMIT 1");
+const getSettingValueQuery = database.query("SELECT value FROM app_settings WHERE key = ? LIMIT 1");
+const upsertSettingValueQuery = database.query(`
+  INSERT INTO app_settings (key, value, updated_at)
+  VALUES (?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(key) DO UPDATE SET
+    value = excluded.value,
+    updated_at = CURRENT_TIMESTAMP
+`);
+
+const getCacheRecordQuery = database.query(`
+  SELECT video_id, title, file_path, file_size_bytes, duration_seconds, status, error_message, last_accessed_at
+  FROM media_cache
+  WHERE video_id = ?
+  LIMIT 1
+`);
+const upsertCacheRecordQuery = database.query(`
+  INSERT INTO media_cache (
+    video_id, title, file_path, file_size_bytes, duration_seconds, status, error_message, last_accessed_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  ON CONFLICT(video_id) DO UPDATE SET
+    title = excluded.title,
+    file_path = excluded.file_path,
+    file_size_bytes = excluded.file_size_bytes,
+    duration_seconds = excluded.duration_seconds,
+    status = excluded.status,
+    error_message = excluded.error_message,
+    last_accessed_at = CURRENT_TIMESTAMP,
+    updated_at = CURRENT_TIMESTAMP
+`);
+const markCacheAccessedQuery = database.query(`
+  UPDATE media_cache
+  SET last_accessed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+  WHERE video_id = ?
+`);
+const deleteCacheRecordQuery = database.query("DELETE FROM media_cache WHERE video_id = ?");
+const listEvictionCandidatesQuery = database.query(`
+  SELECT video_id, file_path, file_size_bytes
+  FROM media_cache
+  WHERE status = 'ready'
+  ORDER BY COALESCE(last_accessed_at, created_at) ASC
+`);
+const cacheUsageQuery = database.query(`
+  SELECT COALESCE(SUM(file_size_bytes), 0) AS total_bytes, COUNT(*) AS file_count
+  FROM media_cache
+  WHERE status = 'ready'
+`);
+
+function listPinnedIds(): string[] {
+  return selectPinnedIdsQuery.all().map((row) => String((row as { node_id: string }).node_id));
 }
 
-function createPinsStore() {
-  const appDataDir = getAppDataDir();
-  mkdirSync(appDataDir, { recursive: true });
+function togglePinnedId(nodeId: string): { pinned: boolean; pinnedIds: string[] } {
+  const existing = findPinnedIdQuery.get(nodeId) as { node_id: string } | null;
+  if (existing) {
+    deletePinnedIdQuery.run(nodeId);
+    return { pinned: false, pinnedIds: listPinnedIds() };
+  }
 
-  const database = new Database(join(appDataDir, "pins.sqlite"));
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS pinned_nodes (
-      node_id TEXT PRIMARY KEY,
-      pinned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+  insertPinnedIdQuery.run(nodeId);
+  return { pinned: true, pinnedIds: listPinnedIds() };
+}
 
-  const selectPinnedIds = database.query("SELECT node_id FROM pinned_nodes ORDER BY pinned_at DESC");
-  const insertPinnedId = database.query("INSERT OR REPLACE INTO pinned_nodes (node_id) VALUES (?)");
-  const deletePinnedId = database.query("DELETE FROM pinned_nodes WHERE node_id = ?");
-  const findPinnedId = database.query("SELECT node_id FROM pinned_nodes WHERE node_id = ? LIMIT 1");
+function getPlayerMode(): PlayerMode {
+  const row = getSettingValueQuery.get("player_mode") as { value?: string } | null;
+  return row?.value === "youtube" ? "youtube" : "local";
+}
+
+function setPlayerMode(playerMode: PlayerMode): { playerMode: PlayerMode } {
+  upsertSettingValueQuery.run("player_mode", playerMode);
+  return { playerMode };
+}
+
+function getCacheRecord(videoId: string): CacheRecord | null {
+  return (getCacheRecordQuery.get(videoId) as CacheRecord | null) ?? null;
+}
+
+function upsertCacheRecord(record: {
+  videoId: string;
+  title: string | null;
+  filePath: string | null;
+  fileSizeBytes: number | null;
+  durationSeconds: number | null;
+  status: DownloadState;
+  error: string | null;
+}): void {
+  upsertCacheRecordQuery.run(
+    record.videoId,
+    record.title,
+    record.filePath,
+    record.fileSizeBytes,
+    record.durationSeconds,
+    record.status,
+    record.error
+  );
+}
+
+function markCacheAccessed(videoId: string): void {
+  markCacheAccessedQuery.run(videoId);
+}
+
+function deleteCacheRecord(videoId: string): void {
+  deleteCacheRecordQuery.run(videoId);
+}
+
+function getCacheUsage(): { totalBytes: number; fileCount: number } {
+  const row = cacheUsageQuery.get() as { total_bytes: number; file_count: number } | null;
+  return {
+    totalBytes: row?.total_bytes ?? 0,
+    fileCount: row?.file_count ?? 0
+  };
+}
+
+function clearCacheRecords(): void {
+  database.exec("DELETE FROM media_cache");
+}
+
+const activeDownloads = new Map<string, ActiveDownload>();
+
+function getCurrentCacheFileInfo(videoId: string): { filePath: string | null; fileSizeBytes: number | null } {
+  const filePath = findCachedFilePath(videoId);
+  if (!filePath || !existsSync(filePath)) {
+    return { filePath: null, fileSizeBytes: null };
+  }
 
   return {
-    listPinnedIds(): string[] {
-      return selectPinnedIds.all().map((row) => String((row as { node_id: string }).node_id));
-    },
-    togglePinnedId(nodeId: string): { pinned: boolean; pinnedIds: string[] } {
-      const existing = findPinnedId.get(nodeId) as { node_id: string } | null;
-      if (existing) {
-        deletePinnedId.run(nodeId);
-        return { pinned: false, pinnedIds: this.listPinnedIds() };
-      }
-
-      insertPinnedId.run(nodeId);
-      return { pinned: true, pinnedIds: this.listPinnedIds() };
-    }
+    filePath,
+    fileSizeBytes: statSync(filePath).size
   };
+}
+
+function buildDownloadStatus(
+  videoId: string,
+  record: CacheRecord | null,
+  origin: string
+): DownloadStatus {
+  if (!record) {
+    return {
+      videoId,
+      state: "missing",
+      mediaUrl: null,
+      title: null,
+      durationSeconds: null,
+      fileSizeBytes: null,
+      totalSizeBytes: null,
+      progressPercent: null,
+      isPartial: false,
+      error: null
+    };
+  }
+
+  const currentFile = getCurrentCacheFileInfo(videoId);
+  const activeDownload = activeDownloads.get(videoId) ?? null;
+  const hasPartialFile = Boolean(currentFile.filePath);
+  const isReady = record.status === "ready" && hasPartialFile;
+
+  return {
+    videoId,
+    state: (record.status as DownloadState) || "missing",
+    mediaUrl: isReady ? `${origin}/media/${videoId}` : null,
+    title: record.title,
+    durationSeconds: record.duration_seconds,
+    fileSizeBytes: activeDownload?.downloadedBytes ?? (isReady ? record.file_size_bytes : currentFile.fileSizeBytes ?? record.file_size_bytes),
+    totalSizeBytes: activeDownload?.totalSizeBytes ?? record.file_size_bytes ?? null,
+    progressPercent: activeDownload?.progressPercent ?? null,
+    isPartial: false,
+    error: activeDownload?.error ?? record.error_message
+  };
+}
+
+function detectMimeType(filePath: string): string {
+  if (filePath.endsWith(".mp4")) {
+    return "video/mp4";
+  }
+
+  if (filePath.endsWith(".webm")) {
+    return "video/webm";
+  }
+
+  if (filePath.endsWith(".mkv")) {
+    return "video/x-matroska";
+  }
+
+  return "application/octet-stream";
+}
+
+function evictOldestCacheEntries(): void {
+  let { totalBytes } = getCacheUsage();
+  if (totalBytes <= MAX_CACHE_BYTES) {
+    return;
+  }
+
+  const candidates = listEvictionCandidatesQuery.all() as Array<{
+    video_id: string;
+    file_path: string | null;
+    file_size_bytes: number | null;
+  }>;
+
+  for (const candidate of candidates) {
+    if (totalBytes <= MAX_CACHE_BYTES) {
+      break;
+    }
+
+    if (activeDownloads.has(candidate.video_id)) {
+      continue;
+    }
+
+    if (candidate.file_path && existsSync(candidate.file_path)) {
+      unlinkSync(candidate.file_path);
+    }
+
+    deleteCacheRecord(candidate.video_id);
+    totalBytes -= candidate.file_size_bytes ?? 0;
+  }
+}
+
+async function startVideoDownload(videoId: string): Promise<void> {
+  const activeDownload = activeDownloads.get(videoId) ?? null;
+  upsertCacheRecord({
+    videoId,
+    title: null,
+    filePath: null,
+    fileSizeBytes: null,
+    durationSeconds: null,
+    status: "downloading",
+    error: null
+  });
+
+  try {
+    const result = await downloadVideoToCache(videoId, {
+      onProgress: (progress) => {
+        if (!activeDownload) {
+          return;
+        }
+        activeDownload.downloadedBytes = progress.downloadedBytes;
+        activeDownload.totalSizeBytes = progress.totalSizeBytes;
+        activeDownload.progressPercent = progress.progressPercent;
+      }
+    });
+
+    upsertCacheRecord({
+      videoId,
+      title: result.title,
+      filePath: result.filePath,
+      fileSizeBytes: result.fileSizeBytes,
+      durationSeconds: result.durationSeconds,
+      status: "ready",
+      error: null
+    });
+    if (activeDownload) {
+      activeDownload.downloadedBytes = result.fileSizeBytes;
+      activeDownload.totalSizeBytes = result.totalSizeBytes ?? result.fileSizeBytes;
+      activeDownload.progressPercent = 100;
+    }
+    markCacheAccessed(videoId);
+    evictOldestCacheEntries();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (activeDownload) {
+      activeDownload.error = message;
+    }
+    upsertCacheRecord({
+      videoId,
+      title: null,
+      filePath: null,
+      fileSizeBytes: null,
+      durationSeconds: null,
+      status: "error",
+      error: message
+    });
+  } finally {
+    activeDownloads.delete(videoId);
+  }
+}
+
+async function ensureVideoPrepared(videoId: string, origin: string): Promise<DownloadStatus> {
+  const record = getCacheRecord(videoId);
+  if (record?.status === "ready" && record.file_path && existsSync(record.file_path)) {
+    markCacheAccessed(videoId);
+    return buildDownloadStatus(videoId, getCacheRecord(videoId), origin);
+  }
+
+  if (!activeDownloads.has(videoId)) {
+    const activeDownload: ActiveDownload = {
+      promise: Promise.resolve(),
+      downloadedBytes: null,
+      totalSizeBytes: null,
+      progressPercent: null,
+      error: null
+    };
+    activeDownloads.set(videoId, activeDownload);
+    activeDownload.promise = startVideoDownload(videoId);
+  }
+
+  return buildDownloadStatus(videoId, getCacheRecord(videoId), origin);
+}
+
+function parseRangeHeader(rangeHeader: string, fileSize: number): { start: number; end: number } | null {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+  if (!match) {
+    return null;
+  }
+
+  const [, rawStart, rawEnd] = match;
+  if (!rawStart && !rawEnd) {
+    return null;
+  }
+
+  if (!rawStart) {
+    const suffixLength = Number.parseInt(rawEnd, 10);
+    if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
+      return null;
+    }
+    const start = Math.max(fileSize - suffixLength, 0);
+    return { start, end: fileSize - 1 };
+  }
+
+  const start = Number.parseInt(rawStart, 10);
+  const end = rawEnd ? Number.parseInt(rawEnd, 10) : fileSize - 1;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start > end || end >= fileSize) {
+    return null;
+  }
+
+  return { start, end };
+}
+
+function createMediaResponse(request: Request, filePath: string): Response {
+  const mimeType = detectMimeType(filePath);
+  const fileSize = statSync(filePath).size;
+  const rangeHeader = request.headers.get("range");
+  const baseHeaders = {
+    "accept-ranges": "bytes",
+    "cache-control": "no-store",
+    "content-type": mimeType
+  };
+
+  if (!rangeHeader) {
+    return new Response(Bun.file(filePath), {
+      headers: {
+        ...baseHeaders,
+        "content-length": String(fileSize)
+      }
+    });
+  }
+
+  const range = parseRangeHeader(rangeHeader, fileSize);
+  if (!range) {
+    return new Response(null, {
+      status: 416,
+      headers: {
+        ...baseHeaders,
+        "content-range": `bytes */${fileSize}`
+      }
+    });
+  }
+
+  const { start, end } = range;
+  const chunkSize = end - start + 1;
+  return new Response(Bun.file(filePath).slice(start, end + 1), {
+    status: 206,
+    headers: {
+      ...baseHeaders,
+      "content-length": String(chunkSize),
+      "content-range": `bytes ${start}-${end}/${fileSize}`
+    }
+  });
 }
 
 function getFrontendRoot(): string {
@@ -72,7 +470,6 @@ function getFrontendRoot(): string {
 
 function createFrontendServer(): Bun.Server<undefined> {
   const frontendRoot = getFrontendRoot();
-  const pinsStore = createPinsStore();
   let server: Bun.Server<undefined>;
   const apiCorsHeaders = {
     "access-control-allow-origin": "*",
@@ -86,17 +483,14 @@ function createFrontendServer(): Bun.Server<undefined> {
     port: 0,
     async fetch(request) {
       const url = new URL(request.url);
+      const origin = `http://127.0.0.1:${server.port}`;
+
       if (url.pathname.startsWith("/api/") && request.method === "OPTIONS") {
-        return new Response(null, {
-          status: 204,
-          headers: apiCorsHeaders
-        });
+        return new Response(null, { status: 204, headers: apiCorsHeaders });
       }
 
       if (url.pathname === "/api/pins" && request.method === "GET") {
-        return Response.json({ pinnedIds: pinsStore.listPinnedIds() }, {
-          headers: apiCorsHeaders
-        });
+        return Response.json({ pinnedIds: listPinnedIds() }, { headers: apiCorsHeaders });
       }
 
       if (url.pathname === "/api/pins/toggle" && request.method === "POST") {
@@ -105,9 +499,87 @@ function createFrontendServer(): Bun.Server<undefined> {
           return Response.json({ error: "Missing node id" }, { status: 400, headers: apiCorsHeaders });
         }
 
-        return Response.json(pinsStore.togglePinnedId(body.nodeId), {
+        return Response.json(togglePinnedId(body.nodeId), { headers: apiCorsHeaders });
+      }
+
+      if (url.pathname === "/api/app-status" && request.method === "GET") {
+        const cacheUsage = getCacheUsage();
+        const ytDlpState = getYtDlpRuntimeState();
+        return Response.json({
+          ytDlpVersion: ytDlpState.version,
+          ytDlpStatus: ytDlpState.status,
+          ytDlpError: ytDlpState.error,
+          cacheBytes: cacheUsage.totalBytes,
+          cacheFiles: cacheUsage.fileCount,
+          maxCacheBytes: MAX_CACHE_BYTES
+        }, { headers: apiCorsHeaders });
+      }
+
+      if (url.pathname === "/api/settings" && request.method === "GET") {
+        return Response.json({ playerMode: getPlayerMode() }, { headers: apiCorsHeaders });
+      }
+
+      if (url.pathname === "/api/settings" && request.method === "POST") {
+        const body = await request.json() as { playerMode?: string };
+        if (body.playerMode !== "local" && body.playerMode !== "youtube") {
+          return Response.json({ error: "Invalid player mode" }, { status: 400, headers: apiCorsHeaders });
+        }
+
+        return Response.json(setPlayerMode(body.playerMode), { headers: apiCorsHeaders });
+      }
+
+      if (url.pathname === "/api/cache/open" && request.method === "POST") {
+        openCacheDirectory();
+        return Response.json({ ok: true }, { headers: apiCorsHeaders });
+      }
+
+      if (url.pathname === "/api/cache/clear" && request.method === "POST") {
+        if (activeDownloads.size > 0) {
+          return Response.json({ error: "Cannot clear cache while downloads are active." }, { status: 409, headers: apiCorsHeaders });
+        }
+
+        clearCacheDirectory();
+        clearCacheRecords();
+        const cacheUsage = getCacheUsage();
+        return Response.json({ ok: true, cacheBytes: cacheUsage.totalBytes, cacheFiles: cacheUsage.fileCount }, {
           headers: apiCorsHeaders
         });
+      }
+
+      if (url.pathname === "/api/media/prepare" && request.method === "POST") {
+        const body = await request.json() as { videoId?: string };
+        if (!body.videoId) {
+          return Response.json({ error: "Missing video id" }, { status: 400, headers: apiCorsHeaders });
+        }
+
+        const status = await ensureVideoPrepared(body.videoId, origin);
+        return Response.json(status, { headers: apiCorsHeaders });
+      }
+
+      if (url.pathname === "/api/media/status" && request.method === "GET") {
+        const videoId = url.searchParams.get("videoId");
+        if (!videoId) {
+          return Response.json({ error: "Missing video id" }, { status: 400, headers: apiCorsHeaders });
+        }
+
+        return Response.json(buildDownloadStatus(videoId, getCacheRecord(videoId), origin), {
+          headers: apiCorsHeaders
+        });
+      }
+
+      if (url.pathname.startsWith("/media/") && request.method === "GET") {
+        const videoId = url.pathname.split("/").pop();
+        if (!videoId) {
+          return new Response("Missing video id", { status: 400 });
+        }
+
+        const record = getCacheRecord(videoId);
+        if (!record?.file_path || record.status !== "ready" || !existsSync(record.file_path)) {
+          return new Response("Media not found", { status: 404 });
+        }
+
+        markCacheAccessed(videoId);
+        return createMediaResponse(request, record.file_path);
       }
 
       if (url.pathname.startsWith("/youtube/")) {
@@ -116,7 +588,6 @@ function createFrontendServer(): Bun.Server<undefined> {
           return new Response("Missing video id", { status: 400 });
         }
 
-        const origin = `http://127.0.0.1:${server.port}`;
         const embedUrl = `https://www.youtube.com/embed/${videoId}?controls=1&rel=0&origin=${encodeURIComponent(origin)}`;
         const html = `<!DOCTYPE html>
 <html lang="en">
@@ -171,19 +642,19 @@ function createFrontendServer(): Bun.Server<undefined> {
 
 async function getMainViewUrl(): Promise<{ url: string; server: Bun.Server<undefined> | null }> {
   const server = createFrontendServer();
-  const proxyOrigin = encodeURIComponent(`http://127.0.0.1:${server.port}`);
+  const appOrigin = encodeURIComponent(`http://127.0.0.1:${server.port}`);
   const channel = await Updater.localInfo.channel();
   if (channel === "dev") {
     try {
       await fetch(DEV_SERVER_URL, { method: "HEAD" });
       console.log(`HMR enabled: using Vite dev server at ${DEV_SERVER_URL}`);
-      return { url: `${DEV_SERVER_URL}?ytProxyOrigin=${proxyOrigin}`, server };
+      return { url: `${DEV_SERVER_URL}?appOrigin=${appOrigin}`, server };
     } catch {
       console.log("Vite dev server not running. Run 'bun run dev:hmr' for HMR support.");
     }
   }
 
-  const url = `http://127.0.0.1:${server.port}?ytProxyOrigin=${proxyOrigin}`;
+  const url = `http://127.0.0.1:${server.port}?appOrigin=${appOrigin}`;
   console.log(`Serving bundled frontend from ${url}`);
   return { url, server };
 }
@@ -217,11 +688,7 @@ function applyMacOSWindowEffects(mainWindow: BrowserWindow) {
     });
 
     const alignButtons = () =>
-      lib.symbols.setWindowTrafficLightsPosition(
-        mainWindow.ptr,
-        MAC_TRAFFIC_LIGHTS_X,
-        MAC_TRAFFIC_LIGHTS_Y
-      );
+      lib.symbols.setWindowTrafficLightsPosition(mainWindow.ptr, MAC_TRAFFIC_LIGHTS_X, MAC_TRAFFIC_LIGHTS_Y);
     const alignNativeDragRegion = () =>
       lib.symbols.setNativeWindowDragRegion(
         mainWindow.ptr,
@@ -279,6 +746,11 @@ function setupMacOSMenu(mainWindow: BrowserWindow) {
     }
   });
 }
+
+void ensureYtDlpReady(true);
+setInterval(() => {
+  void ensureYtDlpReady(false);
+}, YT_DLP_UPDATE_INTERVAL_MS);
 
 const { url, server } = await getMainViewUrl();
 const isMacOS = process.platform === "darwin";

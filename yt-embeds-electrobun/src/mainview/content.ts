@@ -64,6 +64,18 @@ const nodes: ContentNode[] = [
     accent: "mint"
   },
   {
+    id: "embed-disabled-test",
+    kind: "video",
+    title: "Embed Disabled Test Video",
+    description: "Test node for video ID yvr9TXXc9Hw so we can compare the local downloader and YouTube webview paths.",
+    channel: "Manual Test",
+    videoId: "yvr9TXXc9Hw",
+    durationLabel: "Unknown",
+    children: [],
+    parents: ["discover-home"],
+    accent: "graphite"
+  },
+  {
     id: "crash-course-marathon",
     kind: "playlist",
     title: "Crash Course Marathon",
@@ -91,8 +103,8 @@ const nodes: ContentNode[] = [
     title: "Discover Home",
     description: "A root grouping node for the hardcoded discover content.",
     channel: "Local Library",
-    videoIds: ["beamng-dangerous-driving-9", "video-lab-demo", "starter-video"],
-    children: ["beamng-dangerous-driving-9", "video-lab-demo", "starter-video", "crash-course-marathon"],
+    videoIds: ["beamng-dangerous-driving-9", "video-lab-demo", "starter-video", "embed-disabled-test"],
+    children: ["beamng-dangerous-driving-9", "video-lab-demo", "starter-video", "embed-disabled-test", "crash-course-marathon"],
     parents: [],
     accent: "graphite"
   }

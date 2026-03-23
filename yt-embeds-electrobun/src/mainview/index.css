@@ -54,6 +54,7 @@ img {
 .app-shell {
   position: relative;
   min-height: 100vh;
+  padding-bottom: 18px;
 }
 
 .top-bar {
@@ -269,6 +270,10 @@ img {
   background: rgba(255, 255, 255, 0.1);
 }
 
+.pill-button[hidden] {
+  display: none;
+}
+
 .pill-button-active {
   color: #0f1114;
   background: white;
@@ -349,6 +354,102 @@ img {
   background: transparent;
 }
 
+.player-surface-local {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.player-surface-local::before {
+  content: "";
+  position: absolute;
+  inset: -8%;
+  z-index: 0;
+  background-image:
+    linear-gradient(180deg, rgba(5, 8, 12, 0.18), rgba(5, 8, 12, 0.7)),
+    var(--player-thumbnail-url);
+  background-position: center;
+  background-size: cover;
+  filter: blur(26px) saturate(1.08);
+  transform: scale(1.05);
+  opacity: 0.92;
+}
+
+.cached-video {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  background: #040608;
+  object-fit: contain;
+}
+
+.player-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.08), transparent 42%),
+    linear-gradient(180deg, rgba(5, 8, 12, 0.32), rgba(5, 8, 12, 0.72));
+}
+
+.player-overlay[hidden] {
+  display: none;
+}
+
+.player-overlay-card {
+  width: min(440px, calc(100% - 24px));
+  padding: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 20px;
+  background: rgba(8, 12, 18, 0.72);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(18px);
+}
+
+.download-progress-track {
+  overflow: hidden;
+  height: 10px;
+  margin-top: 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.download-progress-track[hidden] {
+  display: none;
+}
+
+.download-progress-fill {
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.96), rgba(150, 202, 255, 0.92));
+  transition: width 180ms ease;
+}
+
+.download-progress-label {
+  margin: 10px 0 0;
+  font-size: 0.84rem;
+  color: rgba(255, 255, 255, 0.68);
+}
+
+.player-overlay-title {
+  margin: 0 0 8px;
+  font-size: 1.1rem;
+}
+
+.player-overlay-copy {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.player-overlay-card .pill-button {
+  margin-top: 14px;
+}
+
 .hero-button {
   width: 100%;
   margin-top: 16px;
@@ -385,6 +486,40 @@ img {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.settings-grid,
+.settings-notes {
+  display: grid;
+  gap: 16px;
+}
+
+.settings-option {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.settings-option-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.settings-chip-active {
+  color: #0f1114;
+  background: white;
 }
 
 .children-disclosure {
@@ -560,6 +695,31 @@ img {
   margin-top: 16px;
 }
 
+.app-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0 24px 18px;
+}
+
+.footer-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.76);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.pill-button:disabled {
+  cursor: default;
+  opacity: 0.65;
+  transform: none;
+}
+
 @media (max-width: 860px) {
   .top-bar {
     padding-left: 84px;
@@ -567,6 +727,10 @@ img {
 
   .content {
     padding: 24px 16px 36px;
+  }
+
+  .app-footer {
+    padding: 0 16px 18px;
   }
 
   .playlist-grid {
@@ -596,6 +760,10 @@ img {
   .playlist-nav-row,
   .top-nav {
     width: 100%;
+  }
+
+  .app-footer {
+    flex-direction: column;
   }
 
   .button-link,

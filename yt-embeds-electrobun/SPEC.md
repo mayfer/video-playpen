@@ -1,27 +1,221 @@
-abstract out the video player that hides recommendations into areusable component if it's nto already and use it for all video players.
+# yt-embeds-electrobun Local Playback Spec
 
+## Goal
 
+Replace the current primary YouTube-embed playback path with a local-file playback path driven by `yt-dlp`, while keeping the existing ElectroBun YouTube webview player component in the codebase for future fallback or comparison work.
 
-Video mods that we want to support:
+The app should behave like a curated local video library:
 
-1. individual video page: simple UI only video player is visible, with link back to home. a large "play again" button below the video if it has ended. if not, the big button can be "play/pause" depending on if it's playing or paused.
+- choose a hardcoded video or playlist node
+- prepare a local playable file for the selected video
+- play that local file in the app's own video player
+- reuse cached files across launches
+- keep cache size bounded automatically
 
-2. playlist video page: have 3 display modes, either left pane showing list, top pane showing horizontal scrolling list (fade contents at the edges to indicate scrolling), or a dropdown mod where list takes minimal space, highlighting only current video.
+## Non-Goals
 
-3. homepage: shows links to pinned videos and playlists. can unpin from there
+- no attempt to preserve YouTube endscreen behavior
+- no attempt to preserve embedded ads
+- no dependence on user-global or OS-global `yt-dlp`
+- no external DB service
 
-4. discover page: more content shown, i will later provide api's to pull data from, for now we will hardcode a few examples for each type (invidual and playlists). user can pin/unpin content
+## Playback Strategy
 
+### Primary path
 
+1. User opens a video or playlist item.
+2. Frontend requests `/api/media/prepare` for the target `videoId`.
+3. Backend checks SQLite metadata and the cache directory.
+4. If a valid cached file exists, backend returns a local `/media/:videoId` URL.
+5. If not, backend starts a background `yt-dlp` download into the app-owned cache directory and returns a `downloading` state.
+6. Frontend polls `/api/media/status`.
+7. Once ready, frontend switches the HTML5 `<video>` element to the local `/media/:videoId` URL and plays it with native media controls.
 
+### Retained fallback
 
-hmmm i mgetting a better idea
+The existing `SafeYouTubePlayer` component remains in the codebase, but it is not the default playback path anymore.
 
-let's do this as well:
+## App-Owned Runtime Assets
 
-each video or playlist is a "node" and can have children an d parent relationships. this can be used to organize content in hierarchies.
+All runtime assets live inside the app data directory, not in user-global package locations.
 
+### App data root
 
-if there are children, show thumbnail links to them below the video, hidden under a "3 children" or whatever expand button (dont show them automatically, keep distraction free)
+- macOS: `~/Library/Application Support/yt-embeds-electrobun`
+- Windows: `%APPDATA%/yt-embeds-electrobun`
+- Linux: `~/.local/share/yt-embeds-electrobun`
 
+### Required subpaths
 
+- `bin/yt-dlp` or `bin/yt-dlp.exe`
+- `cache/`
+- `app.sqlite`
+
+## yt-dlp Management
+
+### Installation
+
+- On first launch, if the app-local binary is missing, download it into `bin/`.
+- Do not invoke `yt-dlp` from `PATH`.
+- Do not install with Homebrew, pip, npm, or other system/user package managers.
+
+### Updating
+
+- On launch, run an update check.
+- While the app stays open, re-check periodically.
+- Keep the current resolved version in memory and expose it to the UI.
+
+### UI visibility
+
+Show downloader status in the app footer:
+
+- current `yt-dlp` version if available
+- updater state: initializing, updating, ready, or error
+- cache usage summary
+
+## Storage Model
+
+SQLite is the source of truth for persistent app metadata.
+
+### Tables
+
+#### `pinned_nodes`
+
+- `node_id TEXT PRIMARY KEY`
+- `pinned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`
+
+#### `media_cache`
+
+- `video_id TEXT PRIMARY KEY`
+- `title TEXT`
+- `file_path TEXT`
+- `file_size_bytes INTEGER`
+- `duration_seconds REAL`
+- `status TEXT NOT NULL`
+- `error_message TEXT`
+- `last_accessed_at TEXT`
+- `created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`
+- `updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`
+
+### State meanings
+
+- `missing`: no cached file tracked
+- `downloading`: `yt-dlp` job in progress
+- `ready`: cached file exists and is playable
+- `error`: last prepare attempt failed
+
+## Cache Policy
+
+### File storage
+
+- Cache downloaded files in `cache/`.
+- Use predictable names based on YouTube `videoId`.
+- One playable file per video ID.
+
+### Size budget
+
+- Set a hard max cache size in bytes.
+- Current implementation target: `2 GiB`.
+
+### Eviction
+
+- Evict least recently accessed ready files first.
+- Never evict a file currently being downloaded.
+- Update `last_accessed_at` whenever a cached file is served or selected for playback.
+
+### Serving
+
+- Serve cached files through the local Bun server.
+- Support HTTP byte-range requests so the native video element can seek correctly.
+
+## Frontend Player
+
+### New default player
+
+Use a dedicated local-file player component backed by HTML5 `<video>`.
+
+Required behaviors:
+
+- same high-level interface as the old player component:
+  - `loadVideo(videoId)`
+  - `togglePlayback()`
+  - `replay()`
+  - `onStateChange(listener)`
+  - `dispose()`
+- emits player snapshots for:
+  - loading
+  - playing
+  - paused
+  - buffering
+  - ended
+- displays a local status overlay while preparing or downloading
+- displays retry affordance on failure
+
+### Existing page flows
+
+The routed UI remains:
+
+- individual video page
+- playlist page with `left`, `top`, and `dropdown` modes
+- Home with pinned items
+- Discover with hardcoded sample nodes
+- node parent/child relationships and collapsed child section
+
+Only the playback engine changes.
+
+## Backend API
+
+### `GET /api/pins`
+
+Returns current pinned node IDs.
+
+### `POST /api/pins/toggle`
+
+Toggles a node pin and returns updated pinned IDs.
+
+### `GET /api/app-status`
+
+Returns:
+
+- `ytDlpVersion`
+- `ytDlpStatus`
+- `ytDlpError`
+- `cacheBytes`
+- `cacheFiles`
+- `maxCacheBytes`
+
+### `POST /api/media/prepare`
+
+Request body:
+
+- `videoId`
+
+Behavior:
+
+- return `ready` immediately if cache is valid
+- otherwise mark/download in background and return current state
+
+### `GET /api/media/status?videoId=...`
+
+Returns latest known persistent state for a video.
+
+### `GET /media/:videoId`
+
+Streams the cached file with byte-range support.
+
+## Verification
+
+Minimum verification for each iteration:
+
+- `bun run typecheck`
+- `bun run build`
+
+Runtime smoke checks:
+
+- launch app and open a normal video page
+- confirm initial prepare/download overlay appears
+- confirm local playback starts once file is ready
+- confirm footer shows `yt-dlp` version/status
+- confirm pinned items still persist across launches
+- confirm cache survives relaunch
+- confirm playback seeking works after the file is cached

@@ -12,19 +12,44 @@ import {
   getParents,
   getPlaylistItems
 } from "./content";
-import { type PlayerSnapshot, SafeYouTubePlayer } from "./player";
+import { CachedVideoPlayer } from "./local_player";
+import { SafeYouTubePlayer, type PlayerSnapshot } from "./player";
 
-let activePlayer: SafeYouTubePlayer | null = null;
+type PlayerMode = "local" | "youtube";
+
+type AppStatus = {
+  ytDlpVersion: string | null;
+  ytDlpStatus: "initializing" | "ready" | "updating" | "error";
+  ytDlpError: string | null;
+  cacheBytes: number;
+  cacheFiles: number;
+  maxCacheBytes: number;
+};
+
+type AppSettings = {
+  playerMode: PlayerMode;
+};
+
+type ActivePlayer = {
+  dispose: () => void;
+  loadVideo: (videoId: string) => void;
+  onStateChange: (listener: (snapshot: PlayerSnapshot) => void) => void;
+  togglePlayback: () => void;
+  replay: () => void;
+  element: HTMLElement;
+};
+
+let activePlayer: ActivePlayer | null = null;
 let pinnedIds = new Set<string>();
 let pinsLoaded = false;
-
-function getYouTubeProxyOrigin(): string {
-  const params = new URLSearchParams(window.location.search);
-  return params.get("ytProxyOrigin") ?? window.location.origin;
-}
+let settingsLoaded = false;
+let appStatus: AppStatus | null = null;
+let appSettings: AppSettings = { playerMode: "local" };
+let statusPollTimer: number | null = null;
 
 function getAppServerOrigin(): string {
-  return getYouTubeProxyOrigin();
+  const params = new URLSearchParams(window.location.search);
+  return params.get("appOrigin") ?? params.get("ytProxyOrigin") ?? window.location.origin;
 }
 
 async function loadPinnedIds(): Promise<void> {
@@ -34,8 +59,38 @@ async function loadPinnedIds(): Promise<void> {
   pinsLoaded = true;
 }
 
+async function loadAppStatus(): Promise<void> {
+  const response = await fetch(`${getAppServerOrigin()}/api/app-status`);
+  appStatus = await response.json() as AppStatus;
+  refreshFooter();
+}
+
+async function loadAppSettings(): Promise<void> {
+  const response = await fetch(`${getAppServerOrigin()}/api/settings`);
+  appSettings = await response.json() as AppSettings;
+  settingsLoaded = true;
+  refreshFooter();
+}
+
+function startStatusPolling(): void {
+  if (statusPollTimer !== null) {
+    return;
+  }
+
+  statusPollTimer = window.setInterval(() => {
+    void loadAppStatus()
+      .catch((error) => {
+        console.error("Failed to refresh app status", error);
+      });
+  }, 15000);
+}
+
 function isPinned(nodeId: string): boolean {
   return pinnedIds.has(nodeId);
+}
+
+function getPlayerMode(): PlayerMode {
+  return appSettings.playerMode;
 }
 
 async function togglePinned(nodeId: string): Promise<void> {
@@ -48,6 +103,39 @@ async function togglePinned(nodeId: string): Promise<void> {
   });
   const data = await response.json() as { pinnedIds?: string[] };
   pinnedIds = new Set(data.pinnedIds ?? []);
+  renderApp();
+}
+
+async function updatePlayerMode(playerMode: PlayerMode): Promise<void> {
+  const response = await fetch(`${getAppServerOrigin()}/api/settings`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ playerMode })
+  });
+  appSettings = await response.json() as AppSettings;
+  settingsLoaded = true;
+  renderApp();
+}
+
+async function openCacheFolder(): Promise<void> {
+  await fetch(`${getAppServerOrigin()}/api/cache/open`, {
+    method: "POST"
+  });
+}
+
+async function clearCache(): Promise<void> {
+  const response = await fetch(`${getAppServerOrigin()}/api/cache/clear`, {
+    method: "POST"
+  });
+
+  if (!response.ok) {
+    const payload = await response.json() as { error?: string };
+    throw new Error(payload.error ?? "Failed to clear cache.");
+  }
+
+  await loadAppStatus();
   renderApp();
 }
 
@@ -70,11 +158,15 @@ function formatNodeKind(node: ContentNode): string {
   return node.kind === "video" ? "Video" : "Playlist";
 }
 
-function getRoute(): { page: "home" | "discover" | "video" | "playlist"; nodeId?: string; mode?: PlaylistDisplayMode; index?: number } {
+function getRoute(): { page: "home" | "discover" | "settings" | "video" | "playlist"; nodeId?: string; mode?: PlaylistDisplayMode; index?: number } {
   const hash = window.location.hash || "#/";
   const [rawPath, rawQuery] = hash.slice(1).split("?");
   const segments = rawPath.split("/").filter(Boolean);
   const query = new URLSearchParams(rawQuery ?? "");
+
+  if (segments[0] === "settings") {
+    return { page: "settings" };
+  }
 
   if (segments[0] === "discover") {
     return { page: "discover" };
@@ -197,12 +289,74 @@ function createChildrenDisclosure(node: ContentNode): HTMLElement | null {
   return disclosure;
 }
 
-function mountPlayer(host: HTMLElement, videoId: string, onStateChange: (snapshot: PlayerSnapshot) => void): SafeYouTubePlayer {
+function mountPlayer(
+  host: HTMLElement,
+  videoId: string,
+  title: string,
+  onStateChange: (snapshot: PlayerSnapshot) => void
+): ActivePlayer {
   disposeActivePlayer();
-  activePlayer = new SafeYouTubePlayer(videoId, getYouTubeProxyOrigin());
+  activePlayer =
+    getPlayerMode() === "youtube"
+      ? new SafeYouTubePlayer(videoId, getAppServerOrigin())
+      : new CachedVideoPlayer(videoId, getAppServerOrigin(), title);
   activePlayer.onStateChange(onStateChange);
   host.replaceChildren(activePlayer.element);
   return activePlayer;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  }
+
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${bytes} B`;
+}
+
+function createFooterStatus(): HTMLElement {
+  const footer = createElement("footer", "app-footer");
+  const versionText =
+    appStatus?.ytDlpVersion
+      ? `yt-dlp ${appStatus.ytDlpVersion}`
+      : appStatus?.ytDlpStatus === "error"
+        ? "yt-dlp unavailable"
+        : "yt-dlp checking local install";
+  const cacheText = appStatus
+    ? `${formatBytes(appStatus.cacheBytes)} / ${formatBytes(appStatus.maxCacheBytes)} cache`
+    : "cache loading";
+  const statusText =
+    appStatus?.ytDlpStatus === "error"
+      ? appStatus.ytDlpError ?? "download service error"
+      : appStatus?.ytDlpStatus === "updating"
+        ? "updating local downloader"
+        : appStatus?.ytDlpStatus === "ready"
+          ? `${appStatus.cacheFiles} cached file${appStatus.cacheFiles === 1 ? "" : "s"}`
+          : "starting local downloader";
+
+  footer.append(
+    createElement("span", "footer-pill", versionText),
+    createElement("span", "footer-pill", cacheText),
+    createElement("span", "footer-pill", statusText),
+    createElement("span", "footer-pill", `player: ${getPlayerMode()}`)
+  );
+  return footer;
+}
+
+function refreshFooter(): void {
+  const existingFooter = document.querySelector(".app-footer");
+  if (!existingFooter) {
+    return;
+  }
+
+  existingFooter.replaceWith(createFooterStatus());
 }
 
 function renderHomePage(main: HTMLElement): void {
@@ -265,6 +419,93 @@ function renderDiscoverPage(main: HTMLElement): void {
   main.append(intro, videoSection, playlistSection);
 }
 
+function createSettingsChoice(
+  title: string,
+  description: string,
+  playerMode: PlayerMode
+): HTMLElement {
+  const card = createElement("section", "settings-option");
+  const titleRow = createElement("div", "settings-option-head");
+  titleRow.append(
+    createElement("h2", "detail-title detail-title-small", title),
+    createElement(
+      "span",
+      playerMode === getPlayerMode() ? "info-chip settings-chip-active" : "info-chip",
+      playerMode === getPlayerMode() ? "Selected" : "Available"
+    )
+  );
+
+  const copy = createElement("p", "muted", description);
+  const button = createElement(
+    "button",
+    playerMode === getPlayerMode() ? "pill-button pill-button-active" : "pill-button",
+    playerMode === getPlayerMode() ? "Current Player" : "Use This Player"
+  ) as HTMLButtonElement;
+  button.disabled = playerMode === getPlayerMode();
+  button.addEventListener("click", () => {
+    void updatePlayerMode(playerMode);
+  });
+
+  card.append(titleRow, copy, button);
+  return card;
+}
+
+function renderSettingsPage(main: HTMLElement): void {
+  const intro = createElement("section", "page-head");
+  intro.append(
+    createElement("h1", "page-title", "Settings"),
+    createElement("p", "muted page-copy", "Choose the global playback engine for every video page and playlist view.")
+  );
+
+  const playerSection = createElement("section", "content-block settings-grid");
+  playerSection.appendChild(createElement("div", "section-label", "Player Mode"));
+  playerSection.append(
+    createSettingsChoice(
+      "Local Downloader",
+      "Downloads through the app-local yt-dlp binary, caches files, and plays them in the native HTML5 video element.",
+      "local"
+    ),
+    createSettingsChoice(
+      "YouTube Webview",
+      "Uses the older ElectroBun webview player with recommendation-hiding injection. Useful for embed behavior comparisons.",
+      "youtube"
+    )
+  );
+
+  const noteSection = createElement("section", "content-block");
+  noteSection.appendChild(createElement("div", "section-label", "Current Notes"));
+  const notes = createElement("div", "settings-notes");
+  notes.append(
+    createElement("p", "muted", "The setting is global and persisted in the local SQLite app database."),
+    createElement("p", "muted", "Discover includes an embed-disabled test node for video ID yvr9TXXc9Hw so both player paths can be compared.")
+  );
+  noteSection.appendChild(notes);
+
+  const cacheSection = createElement("section", "content-block settings-grid");
+  cacheSection.appendChild(createElement("div", "section-label", "Cache"));
+  const cacheActions = createElement("div", "settings-actions");
+  const openCacheButton = createElement("button", "pill-button", "Open Cache Folder") as HTMLButtonElement;
+  openCacheButton.addEventListener("click", () => {
+    void openCacheFolder();
+  });
+  const clearCacheButton = createElement("button", "pill-button", "Clear Cache") as HTMLButtonElement;
+  clearCacheButton.addEventListener("click", () => {
+    void clearCache().catch((error) => {
+      console.error("Failed to clear cache", error);
+      window.alert(error instanceof Error ? error.message : "Failed to clear cache.");
+    });
+  });
+  cacheActions.append(openCacheButton, clearCacheButton);
+  const cacheCopy = createElement(
+    "p",
+    "muted",
+    "Clear removes downloaded media files and cache metadata. It does not affect pinned content or player settings."
+  );
+  cacheSection.append(cacheActions, cacheCopy);
+
+  main.append(intro, playerSection, cacheSection, noteSection);
+}
+
 function renderVideoPage(main: HTMLElement, node: VideoNode): void {
   const page = createElement("section", "detail-page detail-page-video");
   const backRow = createElement("div", "detail-top-row");
@@ -283,7 +524,7 @@ function renderVideoPage(main: HTMLElement, node: VideoNode): void {
 
   let latestSnapshot: PlayerSnapshot | null = null;
 
-  mountPlayer(playerFrame, node.videoId, (snapshot) => {
+  mountPlayer(playerFrame, node.videoId, node.title, (snapshot) => {
     latestSnapshot = snapshot;
     actionButton.disabled = !snapshot.isReady;
 
@@ -455,7 +696,7 @@ function renderPlaylistPage(
 
   const title = createElement("h2", "detail-title detail-title-small", currentVideo.title);
   const frame = createElement("div", "video-frame video-frame-detail");
-  mountPlayer(frame, currentVideo.videoId, () => undefined);
+  mountPlayer(frame, currentVideo.videoId, currentVideo.title, () => undefined);
 
   const navRow = createElement("div", "playlist-nav-row");
   const previousLink = createElement(
@@ -518,17 +759,22 @@ function renderMissingPage(main: HTMLElement): void {
 }
 
 function renderPage(main: HTMLElement): void {
-  if (!pinsLoaded) {
+  if (!pinsLoaded || !settingsLoaded) {
     const loading = createElement("section", "empty-state");
     loading.append(
-      createElement("h1", "empty-title", "Loading Library"),
-      createElement("p", "muted", "Fetching pinned nodes from local storage database.")
+      createElement("h1", "empty-title", "Loading App"),
+      createElement("p", "muted", "Fetching local pins, player settings, and app status.")
     );
     main.appendChild(loading);
     return;
   }
 
   const route = getRoute();
+
+  if (route.page === "settings") {
+    renderSettingsPage(main);
+    return;
+  }
 
   if (route.page === "discover") {
     renderDiscoverPage(main);
@@ -574,14 +820,15 @@ function renderApp(): void {
 
   nav.append(
     createNavLink("Home", "#/", route.page === "home"),
-    createNavLink("Discover", "#/discover", route.page === "discover")
+    createNavLink("Discover", "#/discover", route.page === "discover"),
+    createNavLink("Settings", "#/settings", route.page === "settings")
   );
   topBar.append(brand, nav);
 
   const main = createElement("main", "content");
   renderPage(main);
 
-  shell.append(topBar, main);
+  shell.append(topBar, main, createFooterStatus());
   root.replaceChildren(shell);
 }
 
@@ -590,12 +837,20 @@ window.addEventListener("hashchange", () => {
 });
 
 window.addEventListener("DOMContentLoaded", () => {
-  void loadPinnedIds()
-    .catch((error) => {
+  startStatusPolling();
+  void Promise.allSettled([
+    loadPinnedIds().catch((error) => {
       console.error("Failed to load pinned ids", error);
       pinsLoaded = true;
+    }),
+    loadAppSettings().catch((error) => {
+      console.error("Failed to load app settings", error);
+      settingsLoaded = true;
+    }),
+    loadAppStatus().catch((error) => {
+      console.error("Failed to load app status", error);
     })
-    .finally(() => {
-      renderApp();
-    });
+  ]).finally(() => {
+    renderApp();
+  });
 });
