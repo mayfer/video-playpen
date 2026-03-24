@@ -5,9 +5,11 @@ import { existsSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import {
   APP_DATA_DIR,
+  clearCachedVideo,
   clearCacheDirectory,
   downloadVideoToCache,
   ensureYtDlpReady,
+  fetchPlaybackUrl,
   findCachedFilePath,
   getYtDlpRuntimeState,
   openCacheDirectory
@@ -23,8 +25,7 @@ const MAC_NATIVE_DRAG_REGION_HEIGHT = 52;
 const DEBUG_SAFE_WINDOW = process.env.YT_EMBEDS_DEBUG_WINDOW === "1";
 const MAX_CACHE_BYTES = 2 * 1024 * 1024 * 1024;
 const YT_DLP_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
-
-type DownloadState = "missing" | "downloading" | "ready" | "error";
+type DownloadState = "missing" | "downloading" | "ready" | "error" | "cancelled";
 type PlayerMode = "local" | "youtube";
 
 type DownloadStatus = {
@@ -53,10 +54,14 @@ type CacheRecord = {
 
 type ActiveDownload = {
   promise: Promise<void>;
+  title: string | null;
+  durationSeconds: number | null;
   downloadedBytes: number | null;
   totalSizeBytes: number | null;
   progressPercent: number | null;
   error: string | null;
+  cancelled: boolean;
+  cancel: () => void;
 };
 
 const DATABASE_PATH = join(APP_DATA_DIR, "app.sqlite");
@@ -209,6 +214,7 @@ function clearCacheRecords(): void {
 }
 
 const activeDownloads = new Map<string, ActiveDownload>();
+const playbackUrlCache = new Map<string, { url: string; resolvedAt: number }>();
 
 function getCurrentCacheFileInfo(videoId: string): { filePath: string | null; fileSizeBytes: number | null } {
   const filePath = findCachedFilePath(videoId);
@@ -250,15 +256,32 @@ function buildDownloadStatus(
   return {
     videoId,
     state: (record.status as DownloadState) || "missing",
-    mediaUrl: isReady ? `${origin}/media/${videoId}` : null,
-    title: record.title,
-    durationSeconds: record.duration_seconds,
+    mediaUrl:
+      record.status === "downloading"
+        ? `${origin}/stream/${videoId}`
+        : isReady
+          ? `${origin}/media/${videoId}`
+          : null,
+    title: activeDownload?.title ?? record.title,
+    durationSeconds: activeDownload?.durationSeconds ?? record.duration_seconds,
     fileSizeBytes: activeDownload?.downloadedBytes ?? (isReady ? record.file_size_bytes : currentFile.fileSizeBytes ?? record.file_size_bytes),
     totalSizeBytes: activeDownload?.totalSizeBytes ?? record.file_size_bytes ?? null,
     progressPercent: activeDownload?.progressPercent ?? null,
-    isPartial: false,
+    isPartial: record.status === "downloading",
     error: activeDownload?.error ?? record.error_message
   };
+}
+
+async function resolvePlaybackUrl(videoId: string): Promise<string> {
+  const cached = playbackUrlCache.get(videoId);
+  const maxAgeMs = 4 * 60 * 60 * 1000;
+  if (cached && Date.now() - cached.resolvedAt < maxAgeMs) {
+    return cached.url;
+  }
+
+  const url = await fetchPlaybackUrl(videoId);
+  playbackUrlCache.set(videoId, { url, resolvedAt: Date.now() });
+  return url;
 }
 
 function detectMimeType(filePath: string): string {
@@ -321,6 +344,25 @@ async function startVideoDownload(videoId: string): Promise<void> {
 
   try {
     const result = await downloadVideoToCache(videoId, {
+      onMetadata: (metadata) => {
+        if (!activeDownload) {
+          return;
+        }
+
+        activeDownload.title = metadata.title;
+        activeDownload.durationSeconds = metadata.durationSeconds;
+        activeDownload.totalSizeBytes = metadata.totalSizeBytes;
+
+        upsertCacheRecord({
+          videoId,
+          title: metadata.title,
+          filePath: null,
+          fileSizeBytes: null,
+          durationSeconds: metadata.durationSeconds,
+          status: "downloading",
+          error: null
+        });
+      },
       onProgress: (progress) => {
         if (!activeDownload) {
           return;
@@ -328,6 +370,15 @@ async function startVideoDownload(videoId: string): Promise<void> {
         activeDownload.downloadedBytes = progress.downloadedBytes;
         activeDownload.totalSizeBytes = progress.totalSizeBytes;
         activeDownload.progressPercent = progress.progressPercent;
+      },
+      onSpawn: (handle) => {
+        if (!activeDownload) {
+          return;
+        }
+        activeDownload.cancel = () => {
+          activeDownload.cancelled = true;
+          handle.kill();
+        };
       }
     });
 
@@ -349,6 +400,20 @@ async function startVideoDownload(videoId: string): Promise<void> {
     evictOldestCacheEntries();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (activeDownload?.cancelled) {
+      clearCachedVideo(videoId);
+      upsertCacheRecord({
+        videoId,
+        title: null,
+        filePath: null,
+        fileSizeBytes: null,
+        durationSeconds: null,
+        status: "cancelled",
+        error: null
+      });
+      return;
+    }
+
     if (activeDownload) {
       activeDownload.error = message;
     }
@@ -376,10 +441,14 @@ async function ensureVideoPrepared(videoId: string, origin: string): Promise<Dow
   if (!activeDownloads.has(videoId)) {
     const activeDownload: ActiveDownload = {
       promise: Promise.resolve(),
+      title: null,
+      durationSeconds: null,
       downloadedBytes: null,
       totalSizeBytes: null,
       progressPercent: null,
-      error: null
+      error: null,
+      cancelled: false,
+      cancel: () => undefined
     };
     activeDownloads.set(videoId, activeDownload);
     activeDownload.promise = startVideoDownload(videoId);
@@ -556,6 +625,47 @@ function createFrontendServer(): Bun.Server<undefined> {
         return Response.json(status, { headers: apiCorsHeaders });
       }
 
+      if (url.pathname === "/api/media/cancel" && request.method === "POST") {
+        const body = await request.json() as { videoId?: string };
+        if (!body.videoId) {
+          return Response.json({ error: "Missing video id" }, { status: 400, headers: apiCorsHeaders });
+        }
+
+        const activeDownload = activeDownloads.get(body.videoId);
+        if (!activeDownload) {
+          clearCachedVideo(body.videoId);
+          upsertCacheRecord({
+            videoId: body.videoId,
+            title: null,
+            filePath: null,
+            fileSizeBytes: null,
+            durationSeconds: null,
+            status: "cancelled",
+            error: null
+          });
+          return Response.json(buildDownloadStatus(body.videoId, getCacheRecord(body.videoId), origin), {
+            headers: apiCorsHeaders
+          });
+        }
+
+        activeDownload.cancelled = true;
+        activeDownload.cancel();
+        clearCachedVideo(body.videoId);
+        playbackUrlCache.delete(body.videoId);
+        return Response.json({
+          videoId: body.videoId,
+          state: "cancelled",
+          mediaUrl: null,
+          title: null,
+          durationSeconds: null,
+          fileSizeBytes: null,
+          totalSizeBytes: null,
+          progressPercent: null,
+          isPartial: false,
+          error: null
+        } satisfies DownloadStatus, { headers: apiCorsHeaders });
+      }
+
       if (url.pathname === "/api/media/status" && request.method === "GET") {
         const videoId = url.searchParams.get("videoId");
         if (!videoId) {
@@ -574,12 +684,67 @@ function createFrontendServer(): Bun.Server<undefined> {
         }
 
         const record = getCacheRecord(videoId);
-        if (!record?.file_path || record.status !== "ready" || !existsSync(record.file_path)) {
+        const filePath =
+          record?.status === "ready" && record.file_path && existsSync(record.file_path)
+            ? record.file_path
+            : null;
+
+        if (!filePath || !existsSync(filePath)) {
           return new Response("Media not found", { status: 404 });
         }
 
         markCacheAccessed(videoId);
-        return createMediaResponse(request, record.file_path);
+        return createMediaResponse(request, filePath);
+      }
+
+      if (url.pathname.startsWith("/stream/") && request.method === "GET") {
+        const videoId = url.pathname.split("/").pop();
+        if (!videoId) {
+          return new Response("Missing video id", { status: 400 });
+        }
+
+        try {
+          const playbackUrl = await resolvePlaybackUrl(videoId);
+          const upstreamHeaders = new Headers();
+          const rangeHeader = request.headers.get("range");
+          if (rangeHeader) {
+            upstreamHeaders.set("range", rangeHeader);
+          }
+
+          const upstream = await fetch(playbackUrl, {
+            headers: upstreamHeaders,
+            redirect: "follow"
+          });
+
+          const responseHeaders = new Headers();
+          const contentType = upstream.headers.get("content-type");
+          const contentLength = upstream.headers.get("content-length");
+          const contentRange = upstream.headers.get("content-range");
+          const acceptRanges = upstream.headers.get("accept-ranges");
+
+          responseHeaders.set("cache-control", "no-store");
+          if (contentType) {
+            responseHeaders.set("content-type", contentType);
+          }
+          if (contentLength) {
+            responseHeaders.set("content-length", contentLength);
+          }
+          if (contentRange) {
+            responseHeaders.set("content-range", contentRange);
+          }
+          if (acceptRanges) {
+            responseHeaders.set("accept-ranges", acceptRanges);
+          }
+
+          return new Response(upstream.body, {
+            status: upstream.status,
+            headers: responseHeaders
+          });
+        } catch (error) {
+          return new Response(error instanceof Error ? error.message : "Failed to stream video", {
+            status: 502
+          });
+        }
       }
 
       if (url.pathname.startsWith("/youtube/")) {

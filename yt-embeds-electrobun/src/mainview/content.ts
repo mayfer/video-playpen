@@ -31,7 +31,7 @@ const nodes: ContentNode[] = [
     id: "beamng-dangerous-driving-9",
     kind: "video",
     title: "BeamNG Drive - Realistic Car Crashes | Dangerous Driving #9",
-    description: "A standalone video node used for the individual video page flow.",
+    description: "",
     channel: "digital DRIVE",
     videoId: "C6ZNrzvaci0",
     durationLabel: "9:51",

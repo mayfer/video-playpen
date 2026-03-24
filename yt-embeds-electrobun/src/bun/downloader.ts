@@ -10,6 +10,10 @@ export type DownloadProgress = {
   progressPercent: number | null;
 };
 
+export type DownloadSpawnHandle = {
+  kill: () => void;
+};
+
 type YtDlpRuntimeState = {
   binaryPath: string;
   version: string | null;
@@ -194,9 +198,16 @@ function getLargestCacheArtifactSize(videoId: string): number {
 }
 
 export function clearCachedVideo(videoId: string): void {
-  const filePath = findCachedFilePath(videoId);
-  if (filePath && existsSync(filePath)) {
-    unlinkSync(filePath);
+  const prefix = `${videoId}.`;
+  for (const fileName of readdirSync(CACHE_DIR)) {
+    if (!fileName.startsWith(prefix)) {
+      continue;
+    }
+
+    const filePath = join(CACHE_DIR, fileName);
+    if (existsSync(filePath)) {
+      unlinkSync(filePath);
+    }
   }
 }
 
@@ -257,10 +268,40 @@ export async function fetchVideoMetadata(videoId: string): Promise<{
   }
 }
 
+export async function fetchPlaybackUrl(videoId: string): Promise<string> {
+  await ensureYtDlpReady();
+
+  const sourceUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const result = await runYtDlp([
+    "-g",
+    "--no-warnings",
+    "--no-playlist",
+    "-f",
+    "best[ext=mp4]/best",
+    sourceUrl
+  ]);
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr || result.stdout || "Failed to resolve playback URL");
+  }
+
+  const playbackUrl = result.stdout.trim().split(/\r?\n/).find(Boolean) ?? "";
+  if (!playbackUrl) {
+    throw new Error("yt-dlp did not return a playback URL");
+  }
+
+  return playbackUrl;
+}
+
 export async function downloadVideoToCache(
   videoId: string,
   options?: {
+    onMetadata?: (metadata: {
+      title: string | null;
+      durationSeconds: number | null;
+      totalSizeBytes: number | null;
+    }) => void;
     onProgress?: (progress: DownloadProgress) => void;
+    onSpawn?: (handle: DownloadSpawnHandle) => void;
   }
 ): Promise<{
   title: string | null;
@@ -270,6 +311,7 @@ export async function downloadVideoToCache(
   fileSizeBytes: number;
 }> {
   const metadata = await fetchVideoMetadata(videoId);
+  options?.onMetadata?.(metadata);
   clearCachedVideo(videoId);
 
   const outputTemplate = join(CACHE_DIR, `${videoId}.%(ext)s`);
@@ -317,6 +359,11 @@ export async function downloadVideoToCache(
     ],
     stdout: "pipe",
     stderr: "pipe"
+  });
+  options?.onSpawn?.({
+    kill: () => {
+      (process as { kill?: (signal?: string | number) => void }).kill?.("SIGTERM");
+    }
   });
 
   const progressTimer = setInterval(() => {
