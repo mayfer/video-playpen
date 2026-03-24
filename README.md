@@ -1,6 +1,6 @@
-# yt-embeds-electrobun
+# Video Playpen
 
-ElectroBun app for a YouTube viewer that hides video recommendations (the ones that show up at the end of a video) to make it compatible with toddlers who easily get obsessed with new videos if they see the thumbnail.
+Video Playpen is an ElectroBun app for a YouTube viewer that hides video recommendations (the ones that show up at the end of a video) to make it compatible with toddlers who easily get obsessed with new videos if they see the thumbnail.
 
 ## Commands
 

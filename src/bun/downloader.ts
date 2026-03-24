@@ -25,6 +25,19 @@ type YtDlpRuntimeState = {
 
 export function getAppDataDir(): string {
   if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Application Support", "video-playpen");
+  }
+
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
+    return join(appData, "video-playpen");
+  }
+
+  return join(homedir(), ".local", "share", "video-playpen");
+}
+
+function getLegacyAppDataDir(): string {
+  if (process.platform === "darwin") {
     return join(homedir(), "Library", "Application Support", "yt-embeds-electrobun");
   }
 
@@ -36,7 +49,18 @@ export function getAppDataDir(): string {
   return join(homedir(), ".local", "share", "yt-embeds-electrobun");
 }
 
-export const APP_DATA_DIR = getAppDataDir();
+function resolveAppDataDir(): string {
+  const appDataDir = getAppDataDir();
+  const legacyAppDataDir = getLegacyAppDataDir();
+
+  if (!existsSync(appDataDir) && existsSync(legacyAppDataDir)) {
+    renameSync(legacyAppDataDir, appDataDir);
+  }
+
+  return appDataDir;
+}
+
+export const APP_DATA_DIR = resolveAppDataDir();
 export const BIN_DIR = join(APP_DATA_DIR, "bin");
 export const CACHE_DIR = join(APP_DATA_DIR, "cache");
 

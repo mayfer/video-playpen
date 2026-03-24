@@ -2,8 +2,8 @@ import type { ElectrobunConfig } from "electrobun";
 
 export default {
   app: {
-    name: "yt-embeds-electrobun",
-    identifier: "net.ayfer.yt-embeds-electrobun",
+    name: "Video Playpen",
+    identifier: "net.ayfer.video-playpen",
     version: "1.0.0"
   },
   build: {

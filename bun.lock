@@ -2,7 +2,7 @@
   "lockfileVersion": 1,
   "workspaces": {
     "": {
-      "name": "yt-embeds-electrobun",
+      "name": "video-playpen",
       "dependencies": {
         "electrobun": "1.16.0",
       },

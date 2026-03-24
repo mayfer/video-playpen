@@ -814,7 +814,7 @@ function renderApp(): void {
 
   const shell = createElement("div", "app-shell");
   const topBar = createElement("header", "top-bar");
-  const brand = createElement("div", "top-bar-title", "Kids Video Playlist");
+  const brand = createElement("div", "top-bar-title", "Video Playpen");
   const nav = createElement("nav", "top-nav");
   const route = getRoute();
 

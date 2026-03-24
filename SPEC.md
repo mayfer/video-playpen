@@ -1,4 +1,4 @@
-# yt-embeds-electrobun Spec
+# Video Playpen Spec
 
 ## Goal
 
@@ -115,9 +115,9 @@ All downloader runtime assets must remain app-local, not user-global.
 
 ### App data root
 
-- macOS: `~/Library/Application Support/yt-embeds-electrobun`
-- Windows: `%APPDATA%/yt-embeds-electrobun`
-- Linux: `~/.local/share/yt-embeds-electrobun`
+- macOS: `~/Library/Application Support/video-playpen`
+- Windows: `%APPDATA%/video-playpen`
+- Linux: `~/.local/share/video-playpen`
 
 ### Required subpaths
 

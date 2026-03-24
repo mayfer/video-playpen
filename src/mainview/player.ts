@@ -10,9 +10,9 @@ declare global {
   }
 
   interface Window {
-    __ytEmbedsHideRecommendationsObserverInstalled?: boolean;
-    __ytEmbedsStateEmitterInstalled?: boolean;
-    __ytEmbedsStateEmitterInterval?: number;
+    __appHideRecommendationsObserverInstalled?: boolean;
+    __appStateEmitterInstalled?: boolean;
+    __appStateEmitterInterval?: number;
   }
 }
 
@@ -30,7 +30,7 @@ type PlayerStateListener = (snapshot: PlayerSnapshot) => void;
 
 const HIDE_AND_STATE_SCRIPT = `
 (() => {
-  const STYLE_ID = "yt-embeds-hide-recommendations";
+  const STYLE_ID = "app-hide-recommendations";
   const CSS = \`
     .ytmCreatorEndscreenHost,
     .ytmCreatorEndscreenScrim,
@@ -110,17 +110,17 @@ const HIDE_AND_STATE_SCRIPT = `
 
   ensureStyle();
 
-  if (!window.__ytEmbedsHideRecommendationsObserverInstalled) {
+  if (!window.__appHideRecommendationsObserverInstalled) {
     const observer = new MutationObserver(() => ensureStyle());
     observer.observe(document.documentElement, { childList: true, subtree: true });
-    window.__ytEmbedsHideRecommendationsObserverInstalled = true;
+    window.__appHideRecommendationsObserverInstalled = true;
   }
 
-  if (window.__ytEmbedsStateEmitterInterval) {
-    window.clearInterval(window.__ytEmbedsStateEmitterInterval);
+  if (window.__appStateEmitterInterval) {
+    window.clearInterval(window.__appStateEmitterInterval);
   }
 
-  window.__ytEmbedsStateEmitterInterval = window.setInterval(emitSnapshot, 400);
+  window.__appStateEmitterInterval = window.setInterval(emitSnapshot, 400);
   emitSnapshot();
 })();
 `;

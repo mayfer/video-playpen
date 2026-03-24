@@ -22,7 +22,10 @@ const MAC_TRAFFIC_LIGHTS_Y = 12;
 const MAC_NATIVE_DRAG_REGION_X = 92;
 const MAC_NATIVE_DRAG_REGION_WIDTH = 260;
 const MAC_NATIVE_DRAG_REGION_HEIGHT = 52;
-const DEBUG_SAFE_WINDOW = process.env.YT_EMBEDS_DEBUG_WINDOW === "1";
+const DEBUG_SAFE_WINDOW =
+  process.env.APP_DEBUG_WINDOW === "1" ||
+  process.env.VIDEO_PLAYPEN_DEBUG_WINDOW === "1" ||
+  process.env.YT_EMBEDS_DEBUG_WINDOW === "1";
 const MAX_CACHE_BYTES = 2 * 1024 * 1024 * 1024;
 const YT_DLP_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 type DownloadState = "missing" | "downloading" | "ready" | "error" | "cancelled";
@@ -921,7 +924,7 @@ const { url, server } = await getMainViewUrl();
 const isMacOS = process.platform === "darwin";
 
 const mainWindow = new BrowserWindow({
-  title: "Kids Video Playlist",
+  title: "Video Playpen",
   url,
   frame: {
     width: 1200,
@@ -947,4 +950,4 @@ mainWindow.on("close", () => {
   Utils.quit();
 });
 
-console.log("yt-embeds-electrobun started");
+console.log("app started");

@@ -1,7 +1,7 @@
 {
-  "name": "yt-embeds-electrobun",
+  "name": "video-playpen",
   "version": "1.0.0",
-  "description": "ElectroBun version of yt-embeds with native macOS vibrancy",
+  "description": "Video Playpen app with native macOS vibrancy",
   "scripts": {
     "dev": "bun run build && electrobun dev",
     "dev:hmr": "concurrently \"bun run hmr\" \"bun run dev\"",
