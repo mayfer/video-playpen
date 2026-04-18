@@ -11,6 +11,19 @@ bun run dev:hmr
 bun run build
 ```
 
+## Pi desktop control
+
+This repo now includes a project-local pi extension at `.pi/extensions/macos-desktop-control/`.
+
+When you run `pi` from this repo on macOS, pi auto-loads tools that let the model:
+
+- list visible app windows
+- capture a screenshot of a specific window
+- focus a window
+- click, scroll, type, and send shortcuts
+
+See `.pi/extensions/macos-desktop-control/README.md` for setup and permissions.
+
 ## Notes
 
 - The window uses `transparent: true` plus a native `NSVisualEffectView` bridge on macOS for the blur background.

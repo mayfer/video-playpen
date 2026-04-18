@@ -17,6 +17,27 @@ type DownloadStatus = {
 
 type PlayerStateListener = (snapshot: PlayerSnapshot) => void;
 
+type VideoControlIcon =
+  | "play"
+  | "pause"
+  | "replay"
+  | "skip-back-10"
+  | "skip-forward-10"
+  | "fullscreen-enter"
+  | "fullscreen-exit";
+
+type FullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
+};
+
+type FullscreenElement = HTMLElement & {
+  webkitRequestFullscreen?: () => Promise<void> | void;
+};
+
+const SEEK_STEP_SECONDS = 10;
+const SVG_NS = "http://www.w3.org/2000/svg";
+
 function getVideoThumbnail(videoId: string): string {
   return `https://i.ytimg.com/vi_webp/${videoId}/hqdefault.webp`;
 }
@@ -69,6 +90,67 @@ function formatTime(seconds: number): string {
   return `${minutes}:${String(secs).padStart(2, "0")}`;
 }
 
+function getIconMarkup(icon: VideoControlIcon): string {
+  switch (icon) {
+    case "play":
+      return `<path d="M9 6.2 18 12 9 17.8Z" fill="currentColor" />`;
+    case "pause":
+      return `
+        <rect x="8.15" y="6.35" width="3.1" height="11.3" rx="0.85" fill="currentColor" />
+        <rect x="12.75" y="6.35" width="3.1" height="11.3" rx="0.85" fill="currentColor" />
+      `;
+    case "replay":
+      return `
+        <path d="M8.15 6.75H5.25V3.85" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.85" />
+        <path d="M5.65 6.75a7 7 0 1 1-1.05 6.35" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.85" />
+        <path d="M10.15 8.7 15.35 12l-5.2 3.3Z" fill="currentColor" />
+      `;
+    case "skip-back-10":
+      return `
+        <path d="M9.1 5.25 5.85 8.5l3.25 3.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" />
+        <path d="M6.15 8.5a6.9 6.9 0 1 1-1.04 5.95" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" />
+        <text x="12" y="14.25" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="5.65" font-weight="700" fill="currentColor">10</text>
+      `;
+    case "skip-forward-10":
+      return `
+        <path d="M14.9 5.25 18.15 8.5l-3.25 3.25" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" />
+        <path d="M17.85 8.5a6.9 6.9 0 1 0 1.04 5.95" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" />
+        <text x="12" y="14.25" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="5.65" font-weight="700" fill="currentColor">10</text>
+      `;
+    case "fullscreen-enter":
+      return `
+        <path d="M8.2 4.9h-3.3v3.3M15.8 4.9h3.3v3.3M19.1 15.8v3.3h-3.3M8.2 19.1h-3.3v-3.3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.85" />
+      `;
+    case "fullscreen-exit":
+      return `
+        <path d="M9.05 5.2v3.85H5.2M14.95 5.2v3.85h3.85M18.8 14.95h-3.85v3.85M5.2 14.95h3.85v3.85" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.85" />
+      `;
+  }
+}
+
+function createVideoIcon(icon: VideoControlIcon): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "video-control-icon");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  svg.innerHTML = getIconMarkup(icon);
+  return svg;
+}
+
+function setIconButton(button: HTMLButtonElement, label: string, icon: VideoControlIcon): void {
+  button.replaceChildren(createVideoIcon(icon));
+  button.setAttribute("aria-label", label);
+  button.title = label;
+}
+
+function createIconButton(className: string, label: string, icon: VideoControlIcon): HTMLButtonElement {
+  const button = createElement("button", className) as HTMLButtonElement;
+  button.type = "button";
+  setIconButton(button, label, icon);
+  return button;
+}
+
 export class CachedVideoPlayer {
   readonly element: HTMLElement;
 
@@ -83,6 +165,11 @@ export class CachedVideoPlayer {
   private readonly controlsTopRow: HTMLElement;
   private readonly controlsBottomRow: HTMLElement;
   private readonly playPauseButton: HTMLButtonElement;
+  private readonly hoverControls: HTMLElement;
+  private readonly skipBackButton: HTMLButtonElement;
+  private readonly skipForwardButton: HTMLButtonElement;
+  private readonly centerPlayPauseButton: HTMLButtonElement;
+  private readonly fullscreenButton: HTMLButtonElement;
   private readonly seekInput: HTMLInputElement;
   private readonly timeLabel: HTMLElement;
   private readonly progressTrack: HTMLElement;
@@ -101,6 +188,9 @@ export class CachedVideoPlayer {
   private dragSeeking = false;
   private playbackUnlocked = false;
   private playbackRequested = false;
+  private readonly handleFullscreenChange = (): void => {
+    this.updateControls();
+  };
 
   constructor(videoId: string, appOrigin: string, title?: string) {
     this.appOrigin = appOrigin;
@@ -115,13 +205,29 @@ export class CachedVideoPlayer {
     };
 
     this.element = createElement("div", "player-surface player-surface-local");
+    this.element.tabIndex = 0;
+    this.element.setAttribute("aria-label", "Video player");
+    this.element.addEventListener("keydown", (event) => {
+      this.handleKeyDown(event);
+    });
     this.stage = createElement("div", "player-video-stage");
+    this.stage.addEventListener("pointerenter", () => {
+      this.focusPlayer();
+    });
+    this.stage.addEventListener("pointerleave", () => {
+      if (document.activeElement === this.element) {
+        this.element.blur();
+      }
+    });
 
     this.video = document.createElement("video");
     this.video.className = "cached-video";
     this.video.controls = false;
     this.video.preload = "metadata";
     this.video.playsInline = true;
+    this.video.addEventListener("click", () => {
+      this.togglePlayback();
+    });
     this.applyPresentation(videoId, this.currentTitle);
 
     this.overlay = createElement("div", "player-overlay");
@@ -142,13 +248,27 @@ export class CachedVideoPlayer {
     this.controls = createElement("div", "video-controls");
     this.controlsTopRow = createElement("div", "video-controls-row video-controls-row-top");
     this.controlsBottomRow = createElement("div", "video-controls-row video-controls-row-bottom");
-    this.playPauseButton = createElement("button", "pill-button video-control-button", "Play") as HTMLButtonElement;
-    this.playPauseButton.addEventListener("click", () => {
-      if (!this.playbackUnlocked && (this.snapshot.isReady || this.currentVideoUrl || this.lastDownloadStatus?.state === "downloading")) {
-        this.startPlayback();
-        return;
-      }
-      this.togglePlayback();
+    this.playPauseButton = createIconButton("video-icon-button video-control-button", "Play", "play");
+    this.playPauseButton.addEventListener("click", () => this.handlePlayPauseControl());
+
+    this.hoverControls = createElement("div", "video-hover-controls");
+    const transportCluster = createElement("div", "video-transport-cluster");
+    this.skipBackButton = createIconButton("video-icon-button video-skip-button", "Back 10 seconds", "skip-back-10");
+    this.centerPlayPauseButton = createIconButton("video-icon-button video-center-button", "Play", "play");
+    this.skipForwardButton = createIconButton(
+      "video-icon-button video-skip-button",
+      "Forward 10 seconds",
+      "skip-forward-10"
+    );
+    this.skipBackButton.addEventListener("click", () => this.seekBySeconds(-SEEK_STEP_SECONDS));
+    this.centerPlayPauseButton.addEventListener("click", () => this.handlePlayPauseControl());
+    this.skipForwardButton.addEventListener("click", () => this.seekBySeconds(SEEK_STEP_SECONDS));
+    transportCluster.append(this.skipBackButton, this.centerPlayPauseButton, this.skipForwardButton);
+    this.hoverControls.appendChild(transportCluster);
+
+    this.fullscreenButton = createIconButton("video-icon-button video-fullscreen-button", "Enter Full Screen", "fullscreen-enter");
+    this.fullscreenButton.addEventListener("click", () => {
+      void this.toggleFullscreen();
     });
 
     this.seekInput = document.createElement("input");
@@ -190,18 +310,22 @@ export class CachedVideoPlayer {
     const progressWrap = createElement("div", "download-progress-inline");
     progressWrap.append(this.progressTrack, this.progressLabel);
 
-    this.controlsTopRow.append(this.playPauseButton, this.seekInput, this.timeLabel);
+    this.controlsTopRow.append(this.playPauseButton, this.seekInput, this.timeLabel, this.fullscreenButton);
     this.controlsBottomRow.append(progressWrap, this.cancelButton);
     this.controls.append(this.controlsTopRow, this.controlsBottomRow);
 
+    document.addEventListener("fullscreenchange", this.handleFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", this.handleFullscreenChange);
     this.bindVideoEvents();
-    this.stage.append(this.video, this.overlay);
+    this.stage.append(this.video, this.hoverControls, this.overlay);
     this.element.append(this.stage, this.controls);
     this.loadVideo(videoId, this.currentTitle);
   }
 
   dispose(): void {
     this.stopPolling();
+    document.removeEventListener("fullscreenchange", this.handleFullscreenChange);
+    document.removeEventListener("webkitfullscreenchange", this.handleFullscreenChange);
     this.video.pause();
     this.video.removeAttribute("src");
     this.video.load();
@@ -251,6 +375,18 @@ export class CachedVideoPlayer {
     void this.prepareVideo(token, videoId);
   }
 
+  private handlePlayPauseControl(): void {
+    if (
+      !this.playbackUnlocked &&
+      (this.snapshot.isReady || this.currentVideoUrl || this.lastDownloadStatus?.state === "downloading")
+    ) {
+      this.startPlayback();
+      return;
+    }
+
+    this.togglePlayback();
+  }
+
   togglePlayback(): void {
     if (!this.snapshot.isReady) {
       return;
@@ -274,6 +410,35 @@ export class CachedVideoPlayer {
     this.video.pause();
   }
 
+  private focusPlayer(): void {
+    const activeElement = document.activeElement;
+    if (activeElement instanceof HTMLElement && !this.element.contains(activeElement)) {
+      const tagName = activeElement.tagName.toLowerCase();
+      if (tagName === "input" || tagName === "select" || tagName === "textarea" || activeElement.isContentEditable) {
+        return;
+      }
+    }
+
+    this.element.focus({ preventScroll: true });
+  }
+
+  private handleKeyDown(event: KeyboardEvent): void {
+    if (event.altKey || event.ctrlKey || event.metaKey) {
+      return;
+    }
+
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      this.seekBySeconds(-SEEK_STEP_SECONDS);
+      return;
+    }
+
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      this.seekBySeconds(SEEK_STEP_SECONDS);
+    }
+  }
+
   replay(): void {
     if (!this.snapshot.isReady) {
       return;
@@ -283,6 +448,60 @@ export class CachedVideoPlayer {
     this.video.currentTime = 0;
     void this.video.play().catch(() => undefined);
     this.hideOverlay();
+    this.updateControls();
+  }
+
+  private seekBySeconds(deltaSeconds: number): void {
+    if (!this.snapshot.isReady) {
+      return;
+    }
+
+    this.seekToSeconds(this.video.currentTime + deltaSeconds);
+  }
+
+  private seekToSeconds(seconds: number): void {
+    if (!this.snapshot.isReady || !Number.isFinite(seconds)) {
+      return;
+    }
+
+    const duration = this.getDurationSeconds();
+    const seekLimit = this.getSeekLimitSeconds(duration);
+    const target = Math.min(Math.max(seconds, 0), seekLimit);
+    this.video.currentTime = target;
+    this.updateSnapshot(this.video.ended ? "ended" : this.video.paused ? "paused" : "playing");
+    this.updateControls();
+  }
+
+  private isFullscreen(): boolean {
+    const fullscreenDocument = document as FullscreenDocument;
+    return document.fullscreenElement === this.element || fullscreenDocument.webkitFullscreenElement === this.element;
+  }
+
+  private canUseFullscreen(): boolean {
+    const fullscreenElement = this.element as FullscreenElement;
+    return Boolean(this.element.requestFullscreen || fullscreenElement.webkitRequestFullscreen);
+  }
+
+  private async toggleFullscreen(): Promise<void> {
+    const fullscreenDocument = document as FullscreenDocument;
+    const fullscreenElement = this.element as FullscreenElement;
+
+    try {
+      if (this.isFullscreen()) {
+        if (document.exitFullscreen) {
+          await document.exitFullscreen();
+        } else {
+          await fullscreenDocument.webkitExitFullscreen?.();
+        }
+      } else if (this.element.requestFullscreen) {
+        await this.element.requestFullscreen();
+      } else {
+        await fullscreenElement.webkitRequestFullscreen?.();
+      }
+    } catch {
+      // Some hosts reject fullscreen without surfacing a useful reason.
+    }
+
     this.updateControls();
   }
 
@@ -547,8 +766,29 @@ export class CachedVideoPlayer {
       Boolean(this.currentVideoUrl) || downloadState === "downloading" || downloadState === "ready";
     const playedRatio = duration > 0 ? Math.min(this.video.currentTime / duration, 1) : 0;
     const availableRatio = duration > 0 ? Math.min(seekLimit / duration, 1) : 0;
+    const canSeek = this.snapshot.isReady && duration > 0;
+    const canSeekBackward = canSeek && this.video.currentTime > 0.05;
+    const canSeekForward = canSeek && seekLimit - this.video.currentTime > 0.05;
+    const isStarting = this.playbackRequested && !this.playbackUnlocked;
+    const playbackIcon =
+      this.snapshot.playbackState === "playing" || this.snapshot.playbackState === "buffering"
+        ? "pause"
+        : this.snapshot.playbackState === "ended"
+          ? "replay"
+          : "play";
+    const playbackLabel = isStarting
+      ? "Starting playback"
+      : this.snapshot.playbackState === "playing" || this.snapshot.playbackState === "buffering"
+        ? "Pause"
+        : this.snapshot.playbackState === "ended"
+          ? "Replay"
+          : "Play";
 
     this.playPauseButton.disabled = !this.snapshot.isReady && !canQueuePlayback;
+    this.centerPlayPauseButton.disabled = this.playPauseButton.disabled;
+    this.skipBackButton.disabled = !canSeekBackward;
+    this.skipForwardButton.disabled = !canSeekForward;
+    this.fullscreenButton.disabled = !this.canUseFullscreen();
     this.seekInput.disabled = !this.snapshot.isReady;
     this.seekInput.max = String(Math.max(duration, 0));
     this.seekInput.style.setProperty("--seek-played-percent", `${playedRatio * 100}%`);
@@ -558,14 +798,17 @@ export class CachedVideoPlayer {
       this.seekInput.value = String(Math.min(this.video.currentTime, duration));
     }
 
-    this.playPauseButton.textContent =
-      this.playbackRequested && !this.playbackUnlocked
-        ? "Starting..."
-        : this.snapshot.playbackState === "playing"
-        ? "Pause"
-        : this.snapshot.playbackState === "ended"
-          ? "Replay"
-          : "Play";
+    setIconButton(this.playPauseButton, playbackLabel, playbackIcon);
+    setIconButton(this.centerPlayPauseButton, playbackLabel, playbackIcon);
+    setIconButton(
+      this.fullscreenButton,
+      this.isFullscreen() ? "Exit Full Screen" : "Enter Full Screen",
+      this.isFullscreen() ? "fullscreen-exit" : "fullscreen-enter"
+    );
+    this.centerPlayPauseButton.classList.toggle("video-control-button-loading", isStarting);
+    this.playPauseButton.classList.toggle("video-control-button-loading", isStarting);
+    this.element.classList.toggle("player-controls-pinned", this.snapshot.playbackState !== "playing" || !this.playbackUnlocked);
+    this.element.classList.toggle("player-download-active", downloadState === "downloading");
 
     this.timeLabel.textContent = `${formatTime(this.video.currentTime)} / ${formatTime(duration)}`;
     this.controlsBottomRow.hidden = downloadState !== "downloading";
@@ -578,9 +821,7 @@ export class CachedVideoPlayer {
     }
 
     const desired = Number.parseFloat(this.seekInput.value);
-    const seekLimit = this.getSeekLimitSeconds(this.getDurationSeconds());
-    this.video.currentTime = Math.min(Math.max(desired, 0), seekLimit);
-    this.updateControls();
+    this.seekToSeconds(desired);
   }
 
   private getDurationSeconds(): number {
